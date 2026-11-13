@@ -54,22 +54,18 @@ The `bluesky_consumer.py` script:
 3. Parses the incoming messages.
 4. Publishes the events to the Kafka topic `bluesky-events`.
 
-The incoming events represent activity happening across the Bluesky network.
-
-Examples include:
+Examples of incoming events include:
 
 - A user publishing a post.
 - A user liking a post.
 - A user reposting content.
 - A user following another account.
 
-The pipeline consumes live events rather than relying on a pre-downloaded dataset.
-
 ### 2. Bluesky Public API – Trending Topics
 
 **Source:** [Bluesky API Documentation](https://docs.bsky.app/)
 
-The project also retrieves trending topics using the following public API endpoint:
+The project retrieves trending topics using the following public API endpoint:
 
 ```text
 https://public.api.bsky.app/xrpc/app.bsky.unspecced.getTrends?limit=10
@@ -84,8 +80,6 @@ The `trending_topics.py` script:
 5. Repeats the process every 30 seconds.
 
 The trending topics pipeline operates independently of the Jetstream event pipeline.
-
-This allows the project to process both individual social interactions and broader trending topic information.
 
 ---
 
@@ -367,17 +361,103 @@ docker exec kafka-docker /opt/kafka/bin/kafka-topics.sh \
 
 Start your PostgreSQL server.
 
+### 6.1 Create the Project Database
+
+Open PostgreSQL using your terminal:
+
+```bash
+psql -U postgres
+```
+
 Create the project database:
 
 ```sql
 CREATE DATABASE bluesky_streaming;
 ```
 
-The Python processors connect to this database to store processed information and metrics.
+Exit PostgreSQL:
 
-Configure the PostgreSQL connection settings in the Python scripts to match your local setup.
+```sql
+\q
+```
 
-The database connection details used by the project are:
+### 6.2 Connect to the Project Database
+
+Connect to the newly created database:
+
+```bash
+psql -h localhost -p 5432 -U YOUR_USERNAME -d bluesky_streaming
+```
+
+Replace `YOUR_USERNAME` with your PostgreSQL username.
+
+### 6.3 Create the Required Tables
+
+The project requires two PostgreSQL tables:
+
+| Table | Purpose |
+|---|---|
+| event_metrics | Stores periodic activity-rate metrics |
+| trend_metrics | Stores trending-topic snapshots |
+
+Run the following SQL commands inside the `bluesky_streaming` database.
+
+**Table 1: event_metrics**
+
+This table stores the average number of posts, likes, reposts, and follows per second.
+
+```sql
+CREATE TABLE IF NOT EXISTS event_metrics (
+    id BIGSERIAL PRIMARY KEY,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    avg_posts_per_second INTEGER NOT NULL,
+    avg_likes_per_second INTEGER NOT NULL,
+    avg_reposts_per_second INTEGER NOT NULL,
+    avg_follows_per_second INTEGER NOT NULL
+);
+```
+
+**Table 2: trend_metrics**
+
+This table stores trending-topic snapshots received from the Bluesky public API.
+
+```sql
+CREATE TABLE IF NOT EXISTS trend_metrics (
+    id BIGSERIAL PRIMARY KEY,
+    recorded_at TIMESTAMPTZ NOT NULL,
+    rank INTEGER NOT NULL,
+    topic_name TEXT NOT NULL,
+    post_count BIGINT,
+    category TEXT,
+    status TEXT
+);
+```
+
+### 6.4 Verify Table Creation
+
+To verify that both tables were created successfully, run:
+
+```sql
+\dt
+```
+
+To inspect the structure of the event metrics table:
+
+```sql
+\d event_metrics
+```
+
+To inspect the structure of the trending topics table:
+
+```sql
+\d trend_metrics
+```
+
+You should now have both tables available in your `bluesky_streaming` database.
+
+### 6.5 PostgreSQL Connection Configuration
+
+The Python processors connect to PostgreSQL using the following settings:
 
 | Setting | Value |
 |---|---|
@@ -385,9 +465,11 @@ The database connection details used by the project are:
 | Host | localhost |
 | Port | 5432 |
 | User | Your PostgreSQL username |
-| Password | Your PostgreSQL password |
+| Password | Your PostgreSQL password, if configured |
 
-Make sure the database and required tables are available before running the pipeline. Check the SQL initialization logic in the processor scripts when setting up a fresh database.
+Make sure the PostgreSQL connection settings in the Python scripts match your local configuration.
+
+**Important:** Create the database and tables before starting the Python processors.
 
 ## Step 7: Install Frontend Dependencies
 
@@ -426,8 +508,8 @@ python events_processor.py
 The events processor:
 
 - Consumes incoming messages from `bluesky-events`.
-- Processes the incoming social events.
-- Stores processed information in PostgreSQL.
+- Processes incoming social events.
+- Stores periodic metrics in PostgreSQL.
 - Calculates event and processing metrics.
 - Publishes real-time updates through WebSockets.
 
@@ -440,8 +522,8 @@ python trends_processor.py
 The trends processor:
 
 - Consumes trending topic snapshots from `bluesky-trends`.
-- Processes the incoming trend information.
-- Stores trend data in PostgreSQL.
+- Processes incoming trend information.
+- Stores changed trend snapshots in PostgreSQL.
 - Publishes trending topic updates through WebSockets.
 
 ### Terminal 3 – Bluesky Event Producer
@@ -523,11 +605,11 @@ Displays sampled event processing latency, providing an indication of the time t
 
 ### Accuracy Metrics
 
-Displays event accuracy information calculated by the processing logic.
+Displays event processing success and failure statistics.
 
 ### Database Metrics
 
-Provides information about the database and its stored data.
+Provides information about the average activity rates stored in PostgreSQL.
 
 ### Trending Topics
 
@@ -551,13 +633,15 @@ WebSockets provide continuous communication between the backend and frontend wit
 
 ## Data Storage
 
-PostgreSQL is used as the persistent storage layer for processed events, trending topic information, and monitoring metrics.
+PostgreSQL is used as the persistent storage layer for processed metrics and trending topic information.
 
-The project also uses periodic metrics snapshots to retain monitoring information over time.
+The project stores periodic activity metrics snapshots in the `event_metrics` table.
+
+Trending topic snapshots are stored in the `trend_metrics` table whenever changes are detected.
 
 SQLite is used locally by the event ingestion component as a buffer for handling temporary Kafka publishing interruptions.
 
-This helps protect incoming events when the Kafka broker is temporarily unavailable, depending on the buffering and recovery logic implemented by the producer.
+This provides an additional mechanism for protecting incoming events when the Kafka broker is temporarily unavailable, depending on the buffering and recovery logic implemented by the producer.
 
 ---
 
@@ -585,7 +669,7 @@ This provides several advantages:
 - Incoming events can be buffered in Kafka.
 - Consumers can process messages independently of the ingestion process.
 - Consumer offsets help track message processing progress.
-- Duplicate event handling helps prevent repeated records from being stored.
+- Duplicate event handling helps prevent repeated processing of recently seen events.
 - Local SQLite buffering provides an additional mechanism for handling temporary Kafka publishing interruptions.
 
 The overall reliability of the pipeline depends on producer buffering, Kafka configuration, consumer offset handling, and database operations.
